@@ -6,13 +6,12 @@ pipeline {
         stage('Docker Check') {
             steps {
                 bat 'docker --version'
-                bat 'docker info'
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                bat 'docker build -t docker-jenkins-app:latest .'
+                bat 'cd /d C:\\docker-jenkins-project && docker build -t docker-jenkins-app:latest .'
             }
         }
 
@@ -50,14 +49,23 @@ pipeline {
 
         stage('Tag and Push Docker Image') {
             steps {
-                bat 'docker tag docker-jenkins-app:latest spk1354/docker-jenkins-app:latest'
-                bat 'docker push spk1354/docker-jenkins-app:latest'
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub-pat-test',
+                    usernameVariable: 'DOCKER_USERNAME',
+                    passwordVariable: 'DOCKER_PASSWORD'
+                )]) {
+
+                    bat 'docker tag docker-jenkins-app:latest %DOCKER_USERNAME%/docker-jenkins-app:latest'
+
+                    bat 'docker push %DOCKER_USERNAME%/docker-jenkins-app:latest'
+                }
             }
         }
 
         stage('Run Built Image') {
             steps {
                 bat 'docker rm -f docker-jenkins-app-jenkins 2>NUL || echo No old test container found'
+
                 bat 'docker run -d -p 8084:80 --name docker-jenkins-app-jenkins docker-jenkins-app:latest'
             }
         }
@@ -65,7 +73,8 @@ pipeline {
         stage('Docker Container Check') {
             steps {
                 bat 'docker ps'
-                bat 'docker inspect docker-jenkins-app-jenkins'
+
+                bat 'docker inspect docker-jenkins-app'
             }
         }
 
