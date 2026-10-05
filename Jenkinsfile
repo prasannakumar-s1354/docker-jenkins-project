@@ -20,6 +20,7 @@ pipeline {
 
         stage('Docker Hub Login') {
             steps {
+
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-pat-test',
                     usernameVariable: 'DOCKER_USERNAME',
@@ -57,6 +58,7 @@ pipeline {
 
         stage('Tag and Push Docker Image') {
             steps {
+
                 withCredentials([usernamePassword(
                     credentialsId: 'dockerhub-pat-test',
                     usernameVariable: 'DOCKER_USERNAME',
@@ -83,33 +85,55 @@ pipeline {
                     powershell '''
                         $ErrorActionPreference = "Stop"
 
-                        # AWS ECR details
+                        # ========================================
+                        # AWS ECR DETAILS
+                        # ========================================
+
                         $registry = "018913575233.dkr.ecr.ap-southeast-2.amazonaws.com"
-                        $image = "$registry/docker-jenkins-app:latest"
+
+                        $repository = "docker-jenkins-app"
+
+                        $image = "$registry/$repository:latest"
 
                         # Disable AWS CLI auto prompt
                         $env:AWS_CLI_AUTO_PROMPT = "off"
 
-                        # Create a clean temporary Docker configuration
+                        # ========================================
+                        # TEMPORARY DOCKER CONFIG
+                        # ========================================
+
                         $config = Join-Path $env:WORKSPACE ".docker-ecr"
 
+                        Write-Host ""
                         Write-Host "========================================"
-                        Write-Host "Creating clean Docker configuration..."
+                        Write-Host "AWS ECR LOGIN AND PUSH"
                         Write-Host "========================================"
+
+                        Write-Host ""
+                        Write-Host "Creating temporary Docker configuration..."
 
                         if (Test-Path $config) {
                             Remove-Item $config -Recurse -Force
                         }
 
-                        New-Item -ItemType Directory -Path $config -Force | Out-Null
+                        New-Item `
+                            -ItemType Directory `
+                            -Path $config `
+                            -Force | Out-Null
 
-                        Write-Host "Docker config created."
+                        Write-Host "Temporary Docker configuration created."
 
+                        # ========================================
+                        # GET ECR PASSWORD
+                        # ========================================
+
+                        Write-Host ""
                         Write-Host "========================================"
                         Write-Host "Getting ECR login password..."
                         Write-Host "========================================"
 
-                        $password = aws ecr get-login-password --region ap-southeast-2
+                        $password = aws ecr get-login-password `
+                            --region ap-southeast-2
 
                         if ($LASTEXITCODE -ne 0) {
                             throw "AWS ECR get-login-password failed."
@@ -119,23 +143,50 @@ pipeline {
                             throw "ECR login password is empty."
                         }
 
-                        Write-Host "ECR login password received."
+                        Write-Host "ECR login password received successfully."
 
+                        # ========================================
+                        # CREATE DOCKER AUTH CONFIG
+                        # ========================================
+
+                        Write-Host ""
                         Write-Host "========================================"
-                        Write-Host "Logging into Amazon ECR..."
+                        Write-Host "Creating Docker ECR authentication..."
                         Write-Host "========================================"
 
-                        $password | docker --config $config login `
-                            --username AWS `
-                            --password-stdin `
-                            $registry
+                        $authString = "AWS:" + $password
 
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Docker login to ECR failed."
+                        $authBytes = [System.Text.Encoding]::UTF8.GetBytes(
+                            $authString
+                        )
+
+                        $authBase64 = [System.Convert]::ToBase64String(
+                            $authBytes
+                        )
+
+                        $dockerConfig = @{
+                            auths = @{
+                                $registry = @{
+                                    auth = $authBase64
+                                }
+                            }
                         }
 
-                        Write-Host "ECR login successful."
+                        $configFile = Join-Path $config "config.json"
 
+                        $dockerConfig |
+                            ConvertTo-Json -Depth 10 |
+                            Set-Content `
+                                -Path $configFile `
+                                -Encoding ascii
+
+                        Write-Host "Docker ECR authentication created."
+
+                        # ========================================
+                        # TAG IMAGE FOR ECR
+                        # ========================================
+
+                        Write-Host ""
                         Write-Host "========================================"
                         Write-Host "Tagging Docker image for ECR..."
                         Write-Host "========================================"
@@ -148,8 +199,17 @@ pipeline {
                             throw "Docker ECR tag failed."
                         }
 
-                        Write-Host "ECR image tagged successfully."
+                        Write-Host "Docker image tagged successfully."
 
+                        Write-Host ""
+                        Write-Host "ECR image:"
+                        Write-Host $image
+
+                        # ========================================
+                        # PUSH IMAGE TO ECR
+                        # ========================================
+
+                        Write-Host ""
                         Write-Host "========================================"
                         Write-Host "Pushing image to Amazon ECR..."
                         Write-Host "========================================"
@@ -160,16 +220,32 @@ pipeline {
                             throw "Docker ECR push failed."
                         }
 
+                        Write-Host ""
                         Write-Host "========================================"
                         Write-Host "ECR PUSH SUCCESSFUL"
                         Write-Host "========================================"
 
-                        # Remove temporary Docker configuration
+                        Write-Host ""
+                        Write-Host "Image pushed:"
+                        Write-Host $image
+
+                        # ========================================
+                        # CLEAN TEMPORARY CREDENTIALS
+                        # ========================================
+
+                        Write-Host ""
+                        Write-Host "Removing temporary Docker credentials..."
+
                         if (Test-Path $config) {
                             Remove-Item $config -Recurse -Force
                         }
 
-                        Write-Host "Temporary Docker configuration removed."
+                        Write-Host "Temporary Docker credentials removed."
+
+                        Write-Host ""
+                        Write-Host "========================================"
+                        Write-Host "ECR STAGE COMPLETED SUCCESSFULLY"
+                        Write-Host "========================================"
                     '''
                 }
             }
@@ -177,6 +253,7 @@ pipeline {
 
         stage('Pull Image from Docker Hub') {
             steps {
+
                 bat '''
                     docker pull spk1354/docker-jenkins-app:latest
                 '''
@@ -238,19 +315,22 @@ pipeline {
     post {
 
         success {
+            echo ''
             echo '========================================'
             echo 'JENKINS PIPELINE COMPLETED SUCCESSFULLY'
             echo '========================================'
         }
 
         failure {
+            echo ''
             echo '========================================'
             echo 'JENKINS PIPELINE FAILED'
-            echo 'Please check the console output.'
             echo '========================================'
+            echo 'Please check the console output.'
         }
 
         always {
+            echo ''
             echo 'Pipeline execution completed.'
         }
     }
