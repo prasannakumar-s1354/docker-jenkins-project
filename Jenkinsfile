@@ -22,6 +22,7 @@ pipeline {
                     usernameVariable: 'DOCKER_USERNAME',
                     passwordVariable: 'DOCKER_PASSWORD'
                 )]) {
+
                     powershell '''
                         $tempFile = "$env:TEMP\\docker-pat.txt"
 
@@ -62,11 +63,17 @@ pipeline {
             }
         }
 
-        stage('Run Built Image') {
+        stage('Pull Image from Docker Hub') {
+            steps {
+                bat 'docker pull spk1354/docker-jenkins-app:latest'
+            }
+        }
+
+        stage('Run Docker Hub Image') {
             steps {
                 bat 'docker rm -f docker-jenkins-app-jenkins 2>NUL || echo No old test container found'
 
-                bat 'docker run -d -p 8084:80 --name docker-jenkins-app-jenkins docker-jenkins-app:latest'
+                bat 'docker run -d -p 8084:80 --name docker-jenkins-app-jenkins spk1354/docker-jenkins-app:latest'
             }
         }
 
@@ -74,7 +81,7 @@ pipeline {
             steps {
                 bat 'docker ps'
 
-                bat 'docker inspect docker-jenkins-app'
+                bat 'docker inspect docker-jenkins-app-jenkins'
             }
         }
 
