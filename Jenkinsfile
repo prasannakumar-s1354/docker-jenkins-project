@@ -1,6 +1,12 @@
 pipeline {
     agent any
 
+    environment {
+        ECR_REGISTRY = '018913575233.dkr.ecr.ap-southeast-2.amazonaws.com'
+        ECR_REPOSITORY = 'docker-jenkins-app'
+        ECR_IMAGE = '018913575233.dkr.ecr.ap-southeast-2.amazonaws.com/docker-jenkins-app:latest'
+    }
+
     stages {
 
         stage('Docker Check') {
@@ -59,6 +65,81 @@ pipeline {
                     bat 'docker tag docker-jenkins-app:latest %DOCKER_USERNAME%/docker-jenkins-app:latest'
 
                     bat 'docker push %DOCKER_USERNAME%/docker-jenkins-app:latest'
+                }
+            }
+        }
+
+        stage('ECR Login and Push') {
+            steps {
+
+                withCredentials([[
+                    $class: 'AmazonWebServicesCredentialsBinding',
+                    credentialsId: 'aws-ecr-jenkins'
+                ]]) {
+
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+
+                        $config = Join-Path $env:WORKSPACE ".docker-ecr"
+
+                        try {
+
+                            # Remove old temporary Docker configuration
+                            if (Test-Path $config) {
+                                Remove-Item $config -Recurse -Force
+                            }
+
+                            # Create clean Docker configuration folder
+                            New-Item -ItemType Directory -Path $config | Out-Null
+
+                            Write-Host "Getting ECR login password..."
+
+                            $password = aws ecr get-login-password --region ap-southeast-2
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "AWS ECR login password generation failed."
+                            }
+
+                            Write-Host "Logging into Amazon ECR..."
+
+                            $password | docker --config $config login `
+                                --username AWS `
+                                --password-stdin `
+                                $env:ECR_REGISTRY
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker login to ECR failed."
+                            }
+
+                            Write-Host "Tagging image for ECR..."
+
+                            docker --config $config tag `
+                                docker-jenkins-app:latest `
+                                $env:ECR_IMAGE
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "ECR image tagging failed."
+                            }
+
+                            Write-Host "Pushing image to ECR..."
+
+                            docker --config $config push $env:ECR_IMAGE
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "ECR image push failed."
+                            }
+
+                            Write-Host "ECR image pushed successfully."
+
+                        }
+                        finally {
+
+                            # Remove temporary Docker credentials
+                            if (Test-Path $config) {
+                                Remove-Item $config -Recurse -Force
+                            }
+                        }
+                    '''
                 }
             }
         }
