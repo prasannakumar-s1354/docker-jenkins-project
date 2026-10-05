@@ -1,22 +1,45 @@
 pipeline {
+
     agent any
 
     stages {
 
         stage('Docker Check') {
             steps {
-                bat 'docker --version'
-            }
-        }
+                powershell '''
+                    Write-Host "========================================"
+                    Write-Host "Checking Docker..."
+                    Write-Host "========================================"
 
-        stage('Build Docker Image') {
-            steps {
-                bat '''
-                    cd /d C:\\docker-jenkins-project
-                    docker build -t docker-jenkins-app:latest .
+                    docker --version
+                    docker info
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker check failed."
+                    }
                 '''
             }
         }
+
+
+        stage('Build Docker Image') {
+            steps {
+                powershell '''
+                    Write-Host "========================================"
+                    Write-Host "Building Docker Image..."
+                    Write-Host "========================================"
+
+                    docker build -t docker-jenkins-app:latest .
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker image build failed."
+                    }
+
+                    docker images docker-jenkins-app
+                '''
+            }
+        }
+
 
         stage('Docker Hub Login') {
             steps {
@@ -29,31 +52,45 @@ pipeline {
                     powershell '''
                         $ErrorActionPreference = "Stop"
 
+                        Write-Host "========================================"
+                        Write-Host "Logging into Docker Hub..."
+                        Write-Host "========================================"
+
                         $tempFile = "$env:TEMP\\docker-pat.txt"
 
-                        [System.IO.File]::WriteAllText(
-                            $tempFile,
-                            $env:DOCKER_PASSWORD,
-                            [System.Text.UTF8Encoding]::new($false)
-                        )
+                        try {
 
-                        docker logout
+                            [System.IO.File]::WriteAllText(
+                                $tempFile,
+                                $env:DOCKER_PASSWORD,
+                                [System.Text.UTF8Encoding]::new($false)
+                            )
 
-                        cmd /c "docker login -u $env:DOCKER_USERNAME --password-stdin < `"$tempFile`""
+                            docker logout 2>$null
 
-                        $loginResult = $LASTEXITCODE
+                            cmd /c "docker login -u $env:DOCKER_USERNAME --password-stdin < `"$tempFile`""
 
-                        Remove-Item $tempFile -Force
+                            $loginResult = $LASTEXITCODE
 
-                        if ($loginResult -ne 0) {
-                            throw "Docker Hub login failed."
+                            if ($loginResult -ne 0) {
+                                throw "Docker Hub login failed."
+                            }
+
+                            Write-Host "Docker Hub login successful."
+
                         }
+                        finally {
 
-                        Write-Host "Docker Hub login successful."
+                            if (Test-Path $tempFile) {
+                                Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
+                            }
+
+                        }
                     '''
                 }
             }
         }
+
 
         stage('Tag and Push Docker Image') {
             steps {
@@ -63,14 +100,35 @@ pipeline {
                     passwordVariable: 'DOCKER_PASSWORD'
                 )]) {
 
-                    bat '''
-                        docker tag docker-jenkins-app:latest %DOCKER_USERNAME%/docker-jenkins-app:latest
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
 
-                        docker push %DOCKER_USERNAME%/docker-jenkins-app:latest
+                        Write-Host "========================================"
+                        Write-Host "Tagging Docker Hub Image..."
+                        Write-Host "========================================"
+
+                        docker tag docker-jenkins-app:latest spk1354/docker-jenkins-app:latest
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Docker Hub tag failed."
+                        }
+
+                        Write-Host "========================================"
+                        Write-Host "Pushing Image to Docker Hub..."
+                        Write-Host "========================================"
+
+                        docker push spk1354/docker-jenkins-app:latest
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Docker Hub push failed."
+                        }
+
+                        Write-Host "Docker Hub push successful."
                     '''
                 }
             }
         }
+
 
         stage('ECR Login and Push') {
             steps {
@@ -83,157 +141,245 @@ pipeline {
                     powershell '''
                         $ErrorActionPreference = "Stop"
 
-                        # AWS ECR details
-                        $registry = "018913575233.dkr.ecr.ap-southeast-2.amazonaws.com"
-                        $image = "$registry/docker-jenkins-app:latest"
+                        Write-Host "========================================"
+                        Write-Host "Amazon ECR Authentication"
+                        Write-Host "========================================"
 
-                        # Disable AWS CLI auto prompt
+                        $registry = "018913575233.dkr.ecr.ap-southeast-2.amazonaws.com"
+                        $repository = "docker-jenkins-app"
+                        $image = "$registry/$repository:latest"
+
                         $env:AWS_CLI_AUTO_PROMPT = "off"
 
-                        # Create a clean temporary Docker configuration
+                        # Temporary Docker configuration directory
                         $config = Join-Path $env:WORKSPACE ".docker-ecr"
 
-                        Write-Host "========================================"
-                        Write-Host "Creating clean Docker configuration..."
-                        Write-Host "========================================"
+                        try {
 
-                        if (Test-Path $config) {
-                            Remove-Item $config -Recurse -Force
+                            # Remove old configuration if it exists
+                            if (Test-Path $config) {
+                                Remove-Item $config -Recurse -Force
+                            }
+
+                            New-Item -ItemType Directory -Path $config -Force | Out-Null
+
+                            Write-Host "========================================"
+                            Write-Host "Getting ECR authentication token..."
+                            Write-Host "========================================"
+
+                            $password = aws ecr get-login-password --region ap-southeast-2
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "AWS ECR get-login-password failed."
+                            }
+
+                            if ([string]::IsNullOrWhiteSpace($password)) {
+                                throw "ECR authentication password is empty."
+                            }
+
+                            Write-Host "ECR authentication token received."
+
+                            # Create AWS ECR authentication string
+                            $authString = "AWS:" + $password
+
+                            $authBytes = [System.Text.Encoding]::UTF8.GetBytes($authString)
+
+                            $authBase64 = [System.Convert]::ToBase64String($authBytes)
+
+                            # Create Docker config.json
+                            $dockerConfig = @{
+                                auths = @{
+                                    $registry = @{
+                                        auth = $authBase64
+                                    }
+                                }
+                            }
+
+                            $configFile = Join-Path $config "config.json"
+
+                            $dockerConfig |
+                                ConvertTo-Json -Depth 10 |
+                                Set-Content -Path $configFile -Encoding ascii
+
+                            Write-Host "========================================"
+                            Write-Host "Docker ECR configuration created."
+                            Write-Host "========================================"
+
+                            # Tag image for ECR
+                            docker --config $config tag `
+                                docker-jenkins-app:latest `
+                                $image
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker ECR tag failed."
+                            }
+
+                            Write-Host "ECR image tagged successfully."
+
+                            Write-Host "========================================"
+                            Write-Host "Pushing Image to Amazon ECR..."
+                            Write-Host "========================================"
+
+                            # Push using temporary Docker configuration
+                            docker --config $config push $image
+
+                            if ($LASTEXITCODE -ne 0) {
+                                throw "Docker ECR push failed."
+                            }
+
+                            Write-Host "========================================"
+                            Write-Host "Amazon ECR push successful."
+                            Write-Host "========================================"
+
                         }
+                        finally {
 
-                        New-Item -ItemType Directory -Path $config -Force | Out-Null
+                            # Always remove temporary ECR credentials
+                            if (Test-Path $config) {
+                                Remove-Item $config -Recurse -Force -ErrorAction SilentlyContinue
+                            }
 
-                        Write-Host "Docker config created."
-
-                        Write-Host "========================================"
-                        Write-Host "Getting ECR login password..."
-                        Write-Host "========================================"
-
-                        $password = aws ecr get-login-password --region ap-southeast-2
-
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "AWS ECR get-login-password failed."
+                            Write-Host "Temporary ECR Docker configuration removed."
                         }
-
-                        if ([string]::IsNullOrWhiteSpace($password)) {
-                            throw "ECR login password is empty."
-                        }
-
-                        Write-Host "ECR login password received."
-
-                        Write-Host "========================================"
-                        Write-Host "Logging into Amazon ECR..."
-                        Write-Host "========================================"
-
-                        $password | docker --config $config login `
-                            --username AWS `
-                            --password-stdin `
-                            $registry
-
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Docker login to ECR failed."
-                        }
-
-                        Write-Host "ECR login successful."
-
-                        Write-Host "========================================"
-                        Write-Host "Tagging Docker image for ECR..."
-                        Write-Host "========================================"
-
-                        docker --config $config tag `
-                            docker-jenkins-app:latest `
-                            $image
-
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Docker ECR tag failed."
-                        }
-
-                        Write-Host "ECR image tagged successfully."
-
-                        Write-Host "========================================"
-                        Write-Host "Pushing image to Amazon ECR..."
-                        Write-Host "========================================"
-
-                        docker --config $config push $image
-
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Docker ECR push failed."
-                        }
-
-                        Write-Host "========================================"
-                        Write-Host "ECR PUSH SUCCESSFUL"
-                        Write-Host "========================================"
-
-                        # Remove temporary Docker configuration
-                        if (Test-Path $config) {
-                            Remove-Item $config -Recurse -Force
-                        }
-
-                        Write-Host "Temporary Docker configuration removed."
                     '''
                 }
             }
         }
 
+
         stage('Pull Image from Docker Hub') {
             steps {
-                bat '''
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "========================================"
+                    Write-Host "Pulling Image from Docker Hub..."
+                    Write-Host "========================================"
+
                     docker pull spk1354/docker-jenkins-app:latest
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker Hub pull failed."
+                    }
+
+                    Write-Host "Docker Hub image pulled successfully."
                 '''
             }
         }
+
 
         stage('Run Docker Hub Image') {
             steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
 
-                bat '''
-                    docker rm -f docker-jenkins-app-jenkins 2>NUL || echo No old test container found
-                '''
+                    Write-Host "========================================"
+                    Write-Host "Running Docker Hub Image..."
+                    Write-Host "========================================"
 
-                bat '''
-                    docker run -d -p 8084:80 --name docker-jenkins-app-jenkins spk1354/docker-jenkins-app:latest
+                    docker stop docker-jenkins-app-jenkins 2>$null
+                    docker rm docker-jenkins-app-jenkins 2>$null
+
+                    docker run -d `
+                        -p 8085:80 `
+                        --name docker-jenkins-app-jenkins `
+                        spk1354/docker-jenkins-app:latest
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker container run failed."
+                    }
+
+                    Write-Host "Container started successfully."
+                    Write-Host "Application URL: http://localhost:8085"
                 '''
             }
         }
+
 
         stage('Docker Container Check') {
             steps {
+                powershell '''
+                    Write-Host "========================================"
+                    Write-Host "Checking Docker Container..."
+                    Write-Host "========================================"
 
-                bat '''
                     docker ps
-                '''
 
-                bat '''
                     docker inspect docker-jenkins-app-jenkins
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker container check failed."
+                    }
                 '''
             }
         }
 
+
         stage('Volume Persistence Test') {
             steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
 
-                bat '''
-                    docker exec docker-jenkins-app cat /usr/share/nginx/html/volume-test.txt
-                '''
+                    Write-Host "========================================"
+                    Write-Host "Testing Docker Volume Persistence..."
+                    Write-Host "========================================"
 
-                bat '''
+                    docker stop docker-jenkins-app 2>$null
+                    docker rm docker-jenkins-app 2>$null
+
+                    docker volume create jenkins-docker-volume
+
+                    docker run -d `
+                        -p 8081:80 `
+                        --name docker-jenkins-app `
+                        -v jenkins-docker-volume:/usr/share/nginx/html `
+                        nginx
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker volume container creation failed."
+                    }
+
+                    docker exec docker-jenkins-app `
+                        sh -c "echo 'Volume Persistence Test' > /usr/share/nginx/html/volume-test.txt"
+
+                    Write-Host "Checking volume data..."
+
+                    docker exec docker-jenkins-app `
+                        cat /usr/share/nginx/html/volume-test.txt
+
+                    Write-Host "Stopping container..."
+
                     docker stop docker-jenkins-app
-                '''
 
-                bat '''
+                    Write-Host "Removing container..."
+
                     docker rm docker-jenkins-app
-                '''
 
-                bat '''
-                    docker run -d -p 8081:80 --name docker-jenkins-app -v jenkins-docker-volume:/usr/share/nginx/html nginx
-                '''
+                    Write-Host "Recreating container using same volume..."
 
-                bat '''
-                    docker exec docker-jenkins-app cat /usr/share/nginx/html/volume-test.txt
+                    docker run -d `
+                        -p 8081:80 `
+                        --name docker-jenkins-app `
+                        -v jenkins-docker-volume:/usr/share/nginx/html `
+                        nginx
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker volume recreation failed."
+                    }
+
+                    Write-Host "Checking persisted data..."
+
+                    docker exec docker-jenkins-app `
+                        cat /usr/share/nginx/html/volume-test.txt
+
+                    Write-Host "========================================"
+                    Write-Host "Volume persistence test successful."
+                    Write-Host "========================================"
                 '''
             }
         }
     }
+
 
     post {
 
@@ -246,12 +392,19 @@ pipeline {
         failure {
             echo '========================================'
             echo 'JENKINS PIPELINE FAILED'
-            echo 'Please check the console output.'
+            echo 'Check the console output for the failed stage.'
             echo '========================================'
         }
 
         always {
-            echo 'Pipeline execution completed.'
+            powershell '''
+                # Remove temporary ECR configuration if anything remains
+                $config = Join-Path $env:WORKSPACE ".docker-ecr"
+
+                if (Test-Path $config) {
+                    Remove-Item $config -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            '''
         }
     }
 }
