@@ -147,7 +147,7 @@ pipeline {
 
                         $registry = "018913575233.dkr.ecr.ap-southeast-2.amazonaws.com"
                         $repository = "docker-jenkins-app"
-                        $image = "$registry/$repository:latest"
+                        $image = "${registry}/${repository}:latest"
 
                         $env:AWS_CLI_AUTO_PROMPT = "off"
 
